@@ -22,13 +22,11 @@ from collections import Counter
 from PIL import Image, ImageFilter, ImageOps
 
 # --------------------------------------------------------------------------
-# Ayarlar. Discover çıktısına bakarak buradaki SELECTORS / NOTES_URL kesinleşecek.
+# Ayarlar. Discover çıktısına bakarak buradaki SELECTORS kesinleşti.
 # None = sezgisel (heuristic) bulma kullanılır.
 # --------------------------------------------------------------------------
 BASE_URL = "https://obs.yildiz.edu.tr/oibs/std/"
 LOGIN_URL = BASE_URL
-NOTES_URL = None  # örn. BASE_URL + "not_listesi.aspx"; None ise menüden link metniyle bulunur
-NOTES_LINK_REGEX = r"not\s*listesi|sınav\s*not|notlar|not\s*bilgi"
 
 SELECTORS = {
     "username": "#txtParamT01",
@@ -326,17 +324,47 @@ def login_error_text(page):
     return " | ".join(parts)[:300]
 
 
+NOTES_MENU_TEXT = "Not Listesi"   # Ders ve Dönem İşlemleri > Not Listesi
+NOTES_HREF_JS = """(label) => {
+  for (const a of document.querySelectorAll('a.nav-link')) {
+    const p = a.querySelector('p');
+    if (p && p.textContent.trim() === label) {
+      const m = (a.getAttribute('onclick') || '').match(/'(\\/oibs\\/[^']+)'/);
+      if (m) return m[1];
+    }
+  }
+  return null;
+}"""
+
+
+def notes_frame(page):
+    return page.frame(name="IFRAME1")
+
+
 def open_notes(page):
-    """Not sayfasına gider. Başarısızsa RuntimeError."""
-    if NOTES_URL:
-        page.goto(NOTES_URL, timeout=NAV_TIMEOUT)
-        settle(page)
-        return
-    link = page.get_by_role("link", name=re.compile(NOTES_LINK_REGEX, re.I)).first
-    if link.count() == 0:
-        raise RuntimeError("Not sayfası linki bulunamadı; NOTES_URL ayarlanmalı")
-    link.click()
-    settle(page)
+    """Menüdeki 'Not Listesi' linkinin (oturuma özel gkm token'lı) adresini alıp IFRAME1'e yükler.
+    Not sayfasının frame'ini döndürür."""
+    href = page.evaluate(NOTES_HREF_JS, NOTES_MENU_TEXT)
+    if not href:
+        raise RuntimeError("Menüde 'Not Listesi' linki bulunamadı")
+    before = notes_frame(page).url if notes_frame(page) else ""
+    page.evaluate("u => { document.getElementById('IFRAME1').src = u; }", href)
+    deadline = time.time() + 40
+    fr = None
+    while time.time() < deadline:
+        fr = notes_frame(page)
+        if fr and fr.url != before and "start.aspx" not in fr.url and fr.url != "about:blank":
+            break
+        page.wait_for_timeout(500)
+    else:
+        raise RuntimeError("Not sayfası iframe'e yüklenmedi")
+    try:
+        fr.wait_for_load_state("networkidle", timeout=20_000)
+    except Exception:
+        pass
+    page.wait_for_timeout(1500)
+    log(f"Not sayfası açıldı: {urllib.parse.urlsplit(fr.url).path}")
+    return fr
 
 
 # --------------------------------------------------------------------------
@@ -377,13 +405,8 @@ def parse_tables(tables):
     return result
 
 
-def scrape_grades(page):
-    tables = []
-    for fr in page.frames:
-        try:
-            tables += fr.evaluate(TABLES_JS)
-        except Exception:
-            pass
+def scrape_grades(frame):
+    tables = frame.evaluate(TABLES_JS)
     grades = parse_tables(tables)
     if not grades:
         raise RuntimeError("Not tablosu ayrıştırılamadı (tablo bulunamadı ya da boş)")
@@ -498,18 +521,26 @@ def mode_discover():
             links = page.eval_on_selector_all(
                 "a", "els => els.map(e => ({text:e.innerText.trim(),href:e.getAttribute('href'),id:e.id,target:e.target}))")
             save_json(d / "02_links.json", links)
-            cands = [l for l in links if l["text"] and re.search(NOTES_LINK_REGEX, l["text"], re.I)]
-            save_json(d / "02_notes_link_candidates.json", cands)
-            for i, l in enumerate(cands[:4], 1):
+            try:
+                fr = open_notes(page)
+                save_page(page, "03_notes", d)
+                (d / "03_notes_iframe.html").write_text(fr.content(), encoding="utf-8")
+                tables = fr.evaluate(TABLES_JS)
+                save_json(d / "03_notes_tables.json", tables)
+                # Log'a sadece yapı: tablo boyutları ve ilk satır (başlık) - not değerleri yok
+                for i, t in enumerate(tables):
+                    log(f"TABLO {i}: {len(t)} satır, başlık={t[0] if t else []}")
                 try:
-                    page.get_by_role("link", name=l["text"]).first.click()
-                    settle(page)
-                    save_page(page, f"03_notes_{i}", d)
-                    log(f"Not sayfası adayı {i}: {l['text']!r} -> {page.url}")
-                    page.go_back()
-                    settle(page)
+                    g = parse_tables(tables)
+                    log(f"Ayrıştırıcı {len(g)} ders buldu.")
                 except Exception as e:
-                    log(f"Aday {i} açılamadı: {type(e).__name__}")
+                    log(f"Ayrıştırma hatası: {type(e).__name__}: {e}")
+                selects = fr.eval_on_selector_all(
+                    "select", "els => els.map(e => ({id:e.id,name:e.name,options:Array.from(e.options).map(o=>o.text+(o.selected?' *':''))}))")
+                log("SELECTS " + json.dumps(selects, ensure_ascii=False))
+            except Exception as e:
+                log(f"Not sayfası açılamadı: {type(e).__name__}: {e}")
+                save_page(page, "03_notes_failed", d)
         finally:
             browser.close()
 
@@ -524,9 +555,9 @@ def mode_run():
                 save_page(page, "run_login_failed", OUT_DIR / "error")
                 record_failure("giriş yapılamadı (captcha/kimlik bilgisi)")
                 return 1
-            open_notes(page)
+            fr = open_notes(page)
             try:
-                grades = scrape_grades(page)
+                grades = scrape_grades(fr)
             except Exception:
                 save_page(page, "run_notes_parse_failed", OUT_DIR / "error")
                 raise
