@@ -17,7 +17,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from PIL import Image, ImageOps
+from collections import Counter
+
+from PIL import Image, ImageFilter, ImageOps
 
 # --------------------------------------------------------------------------
 # Ayarlar. Discover çıktısına bakarak buradaki SELECTORS / NOTES_URL kesinleşecek.
@@ -29,11 +31,11 @@ NOTES_URL = None  # örn. BASE_URL + "not_listesi.aspx"; None ise menüden link 
 NOTES_LINK_REGEX = r"not\s*listesi|sınav\s*not|notlar|not\s*bilgi"
 
 SELECTORS = {
-    "username": None,
-    "password": None,
-    "captcha_img": None,
-    "captcha_input": None,
-    "submit": None,
+    "username": "#txtParamT01",
+    "password": "#txtParamT02",
+    "captcha_img": "#imgCaptchaImg",
+    "captcha_input": "#txtSecCode",
+    "submit": "#btnLogin",
     "logged_in": None,  # giriş sonrası görünen bir element; None ise "şifre alanı yok" kontrolü
 }
 
@@ -80,49 +82,91 @@ def telegram(text):
 # --------------------------------------------------------------------------
 # Captcha
 # --------------------------------------------------------------------------
-def _otsu(img):
-    hist = img.histogram()[:256]
-    total = sum(hist)
-    sum_all = sum(i * h for i, h in enumerate(hist))
-    best_t, best_var, w0, sum0 = 128, -1.0, 0, 0
-    for t in range(256):
-        w0 += hist[t]
-        if w0 == 0:
-            continue
-        w1 = total - w0
-        if w1 == 0:
-            break
-        sum0 += t * hist[t]
-        m0, m1 = sum0 / w0, (sum_all - sum0) / w1
-        var = w0 * w1 * (m0 - m1) ** 2
-        if var > best_var:
-            best_var, best_t = var, t
-    return best_t
+# OBS captcha'sı: gri "A + B = ?" yazısı, renkli gürültü çizgileri/daireler, sağda hoparlör ikonu.
+CAPTCHA_CROP = 0.84          # sağdaki hoparlör ikonunu kes
+CAPTCHA_MIN_VOTES = 8        # bu kadar varyant aynı sonucu vermezse gönderme, sayfayı yenile
+CAPTCHA_MIN_MARGIN = 3       # birinci ile ikinci sonuç arasındaki en az oy farkı
+CAPTCHA_MASKS = [(30, 170), (30, 185), (40, 170), (40, 185)]   # (max doygunluk, max parlaklık)
+CAPTCHA_VARIANTS = [(sc, dil, bl) for sc in (3, 4) for dil in (0, 3) for bl in (0, 2)]
 
 
-def preprocess_captcha(src: Path, dst: Path):
-    """Gri ton, 3x büyütme, threshold (Otsu). Metin koyu, zemin beyaz olacak şekilde."""
-    img = Image.open(src).convert("RGBA")
-    bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-    img = Image.alpha_composite(bg, img).convert("L")
-    img = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
-    t = _otsu(img)
-    img = img.point(lambda p: 255 if p > t else 0)
-    if sum(img.histogram()[128:]) < sum(img.histogram()[:128]):  # çoğunluk siyahsa ters çevir
-        img = ImageOps.invert(img)
-    img = ImageOps.expand(img, border=20, fill=255)
-    img.save(dst)
+def captcha_mask(src: Path, sat: int, lum: int, min_size: int = 8):
+    """Gri ton maske: sadece doygunluğu düşük ve koyu pikseller (yazı) siyah kalır,
+    renkli gürültü atılır; küçük bağlı bileşenler (nokta gürültüsü) silinir."""
+    im = Image.open(src).convert("RGB")
+    im = im.crop((0, 0, int(im.width * CAPTCHA_CROP), im.height))
+    w, h = im.size
+    px = im.load()
+    on = [[False] * w for _ in range(h)]
+    for y in range(h):
+        for x in range(w):
+            r, g, b = px[x, y]
+            on[y][x] = max(r, g, b) - min(r, g, b) <= sat and (r + g + b) / 3 <= lum
+    seen = [[False] * w for _ in range(h)]
+    out = Image.new("L", (w, h), 255)
+    o = out.load()
+    for y in range(h):
+        for x in range(w):
+            if not on[y][x] or seen[y][x]:
+                continue
+            stack, comp = [(x, y)], []
+            seen[y][x] = True
+            while stack:
+                cx, cy = stack.pop()
+                comp.append((cx, cy))
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        nx, ny = cx + dx, cy + dy
+                        if 0 <= nx < w and 0 <= ny < h and on[ny][nx] and not seen[ny][nx]:
+                            seen[ny][nx] = True
+                            stack.append((nx, ny))
+            if len(comp) >= min_size:
+                for cx, cy in comp:
+                    o[cx, cy] = 0
+    return out
 
 
-def ocr_captcha(img_path: Path):
-    """(ham_metin, toplam|None) döndürür."""
+def captcha_variant(mask, scale, dilate, blur):
+    """Büyütme (3x/4x), isteğe bağlı yumuşatma, threshold ve kalınlaştırma."""
+    m = mask.resize((mask.width * scale, mask.height * scale),
+                    Image.NEAREST if blur else Image.LANCZOS)
+    if blur:
+        m = m.filter(ImageFilter.GaussianBlur(blur))
+    m = m.point(lambda p: 255 if p > 128 else 0)
+    if dilate:
+        m = m.filter(ImageFilter.MinFilter(dilate))
+    return ImageOps.expand(m, border=20, fill=255)
+
+
+def _tesseract(path: Path):
     r = subprocess.run(
-        ["tesseract", str(img_path), "stdout", "--psm", "7",
-         "-c", "tessedit_char_whitelist=0123456789+"],
+        ["tesseract", str(path), "stdout", "--psm", "7",
+         "-c", "tessedit_char_whitelist=0123456789+=?"],
         capture_output=True, text=True, timeout=30)
-    raw = r.stdout.strip()
-    m = re.search(r"(\d+)\s*\+\s*(\d+)", raw)
-    return raw, (int(m.group(1)) + int(m.group(2)) if m else None)
+    return r.stdout.strip()
+
+
+def solve_captcha(src: Path, work: Path, keep_debug=False):
+    """Birden çok ön işleme varyantını OCR'lar, 'A+B' sonuçlarını oylar.
+    (özet_metin, toplam|None) döndürür; oy yetersizse toplam None."""
+    votes = Counter()
+    tmp = work / "_variant.png"
+    for i, (sat, lum) in enumerate(CAPTCHA_MASKS):
+        mask = captcha_mask(src, sat, lum)
+        for j, (sc, dil, bl) in enumerate(CAPTCHA_VARIANTS):
+            captcha_variant(mask, sc, dil, bl).save(tmp)
+            if keep_debug and i == 0 and j == 0:
+                captcha_variant(mask, sc, dil, bl).save(src.with_name(src.stem + "_processed.png"))
+            m = re.search(r"(\d{1,2})\+(\d{1,2})", _tesseract(tmp))
+            if m:
+                votes[(int(m.group(1)), int(m.group(2)))] += 1
+    tmp.unlink(missing_ok=True)
+    top = votes.most_common(2)
+    desc = ", ".join(f"{a}+{b}:{n}" for (a, b), n in top) or "okunamadı"
+    if not top or top[0][1] < CAPTCHA_MIN_VOTES or (len(top) > 1 and top[0][1] - top[1][1] < CAPTCHA_MIN_MARGIN):
+        return desc, None
+    a, b = top[0][0]
+    return desc, a + b
 
 
 # --------------------------------------------------------------------------
@@ -234,19 +278,16 @@ def login(page, discover_dir=None):
             work = (discover_dir or OUT_DIR / "tmp")
             work.mkdir(parents=True, exist_ok=True)
             raw_png = work / f"captcha_{attempt}.png"
-            proc_png = work / f"captcha_{attempt}_processed.png"
             img_el.screenshot(path=str(raw_png))
-            preprocess_captcha(raw_png, proc_png)
-            raw, total = ocr_captcha(proc_png)
+            raw, total = solve_captcha(raw_png, work, keep_debug=bool(discover_dir))
         except Exception as e:
-            log(f"Deneme {attempt}: login alanları/captcha hatası: {type(e).__name__}: {e}")
+            log(f"Deneme {attempt}: login alanları/captcha hatası: {type(e).__name__}: {str(e).splitlines()[0]}")
             continue
-        log(f"Deneme {attempt}: OCR='{raw}' toplam={total}")
+        log(f"Deneme {attempt}: OCR oyları [{raw}] toplam={total}")
         if discover_dir:
-            (discover_dir / f"captcha_{attempt}.txt").write_text(f"ocr={raw!r} sum={total}\n")
+            (discover_dir / f"captcha_{attempt}.txt").write_text(f"votes={raw} sum={total}\n")
         else:
             raw_png.unlink(missing_ok=True)
-            proc_png.unlink(missing_ok=True)
         if total is None:
             continue
         fill_field(u_el, user)
@@ -260,8 +301,29 @@ def login(page, discover_dir=None):
         if is_logged_in(page):
             log(f"Giriş başarılı (deneme {attempt}).")
             return True
-        log(f"Deneme {attempt}: giriş başarısız.")
+        msg = login_error_text(page)
+        log(f"Deneme {attempt}: giriş başarısız. Sayfa mesajı: {msg!r}")
+        if discover_dir:
+            save_page(page, f"login_fail_{attempt}", discover_dir)
+        if re.search(r"şifre|parola|kullanıcı|kilit|bloke", msg, re.I) and \
+                not re.search(r"güvenlik|kod", msg, re.I):
+            log("Kimlik bilgisi hatası görünüyor; hesap kilitlenmesin diye tekrar denenmiyor.")
+            return False
     return False
+
+
+def login_error_text(page):
+    parts = []
+    for sel in ("#lblSonuclar", "#UtModal_message", "#UtModal_msgBox"):
+        try:
+            loc = page.locator(sel)
+            if loc.count():
+                t = loc.first.inner_text(timeout=2000).strip()
+                if t:
+                    parts.append(t)
+        except Exception:
+            pass
+    return " | ".join(parts)[:300]
 
 
 def open_notes(page):
