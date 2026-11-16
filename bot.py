@@ -37,10 +37,6 @@ SELECTORS = {
     "logged_in": None,  # giriş sonrası görünen bir element; None ise "şifre alanı yok" kontrolü
 }
 
-# Not tablosundaki bilinen sınav sütunu başlıkları (küçük harf, alt dize eşleşmesi)
-EXAM_HEADERS = ["vize", "final", "bütünleme", "butunleme", "ödev", "odev", "quiz",
-                "kısa sınav", "kisa sinav", "proje", "lab", "uygulama", "ara sınav", "mazeret"]
-COURSE_HEADERS = ["ders adı", "ders adi", "dersin adı", "ders"]
 
 OUT_DIR = Path(os.environ.get("OUT_DIR", "out"))
 STATE_DIR = Path(os.environ.get("STATE_DIR", "state"))
@@ -374,43 +370,52 @@ TABLES_JS = """() => Array.from(document.querySelectorAll('table')).map(t =>
   Array.from(t.rows).map(r => Array.from(r.cells).map(c => c.innerText.trim().replace(/\\s+/g,' '))))"""
 
 
+COURSE_TITLE_RE = re.compile(
+    r"^(?P<code>[A-ZÇĞİÖŞÜ]{2,}\d+[A-Z]?)\(\d+\)\s*-\s*(?P<name>.+?)\s*\|\s*"
+    r"Ort:\s*(?P<ort>.*?)\s*Not:\s*(?P<harf>.*?)\s*Durumu:", re.S)
+EMPTY_VALUES = {"", "-", "—", "–"}
+
+
 def parse_tables(tables):
-    """Geniş tablo: sütun başlıkları sınav türleri. Satır başına ders.
-    NOT: gerçek yapı discover çıktısından sonra kesinleştirilecek."""
-    result = {}
+    """not_listesi_op.aspx yapısı: her ders için
+       1) başlık tablosu: 'KOD(şube) - Ders Adı | Ort: x Not: y Durumu: ...'
+       2) sınav tablosu: 'Sınav Adı | Not | İlan Tarihi | Sınıf Ort. | Detay'
+    Dönüş: {ders: {sınav: not}}. Henüz notu olmayan dersler boş dict ile yer alır.
+    Ders başlığı hiç bulunamazsa ValueError."""
+    result, current, found = {}, None, False
     for rows in tables:
-        header_idx = None
-        for i, row in enumerate(rows[:5]):
-            low = [c.lower() for c in row]
-            if any(h in c for c in low for h in COURSE_HEADERS) and \
-               any(h in c for c in low for h in EXAM_HEADERS):
-                header_idx = i
-                break
-        if header_idx is None:
+        if not rows:
             continue
-        header = [c.lower() for c in rows[header_idx]]
-        course_col = next((j for j, c in enumerate(header)
-                           if any(h in c for h in COURSE_HEADERS)), 0)
-        exam_cols = {j: rows[header_idx][j] for j, c in enumerate(header)
-                     if any(h in c for h in EXAM_HEADERS)}
-        for row in rows[header_idx + 1:]:
-            if len(row) <= course_col or not row[course_col]:
+        m = COURSE_TITLE_RE.match(rows[0][0]) if len(rows) == 1 and rows[0] else None
+        if m:
+            found = True
+            name = m.group("name").strip()
+            current = name if name not in result else f"{m.group('code')} {name}"
+            result[current] = {}
+            if m.group("ort").strip() not in EMPTY_VALUES:
+                result[current]["Ortalama"] = m.group("ort").strip()
+            if m.group("harf").strip() not in EMPTY_VALUES:
+                result[current]["Harf Notu"] = m.group("harf").strip()
+            continue
+        header = [c.strip().lower() for c in rows[0]]
+        if current is None or "sınav adı" not in header or "not" not in header:
+            continue
+        i_name, i_grade = header.index("sınav adı"), header.index("not")
+        for row in rows[1:]:
+            if len(row) <= max(i_name, i_grade):
                 continue
-            course = row[course_col]
-            for j, exam in exam_cols.items():
-                if j < len(row):
-                    val = row[j].strip()
-                    if val and val not in ("-", "—", "–", "NA", "N/A"):
-                        result.setdefault(course, {})[exam] = val
+            exam, grade = row[i_name].strip(), row[i_grade].strip()
+            if exam and grade not in EMPTY_VALUES:
+                result[current][exam] = grade
+        current = None
+    if not found:
+        raise ValueError("Not sayfasında ders başlığı bulunamadı")
     return result
 
 
 def scrape_grades(frame):
     tables = frame.evaluate(TABLES_JS)
-    grades = parse_tables(tables)
-    if not grades:
-        raise RuntimeError("Not tablosu ayrıştırılamadı (tablo bulunamadı ya da boş)")
-    return grades
+    return parse_tables(tables)
 
 
 def diff_grades(old, new):
@@ -426,9 +431,10 @@ def diff_grades(old, new):
 
 
 def summary(grades):
-    lines = ["📋 Mevcut notlar:"]
+    lines = ["📋 OBS not takibi başladı. Mevcut notlar:"]
     for course, exams in grades.items():
-        lines.append(f"• {course}: " + ", ".join(f"{e} {v}" for e, v in exams.items()))
+        detail = ", ".join(f"{e} {v}" for e, v in exams.items()) or "henüz not yok"
+        lines.append(f"• {course}: {detail}")
     return "\n".join(lines)
 
 
@@ -532,7 +538,14 @@ def mode_discover():
                     log(f"TABLO {i}: {len(t)} satır, başlık={t[0] if t else []}")
                 try:
                     g = parse_tables(tables)
-                    log(f"Ayrıştırıcı {len(g)} ders buldu.")
+                    log(f"Ayrıştırıcı {len(g)} ders, {sum(len(v) for v in g.values())} not buldu.")
+                    # Satır yapısı (değerler yerine tipler): ilk sınav tablosunun 2. satırı
+                    for t in tables:
+                        if len(t) > 1 and t[0] and t[0][0] == "Sınav Adı":
+                            log("ORNEK_SATIR_YAPISI " + json.dumps(
+                                [("sayı" if re.fullmatch(r"[\d.,]+", c) else ("boş" if not c else c[:20]))
+                                 for c in t[1]], ensure_ascii=False))
+                            break
                 except Exception as e:
                     log(f"Ayrıştırma hatası: {type(e).__name__}: {e}")
                 selects = fr.eval_on_selector_all(
