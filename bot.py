@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -67,7 +68,15 @@ def telegram(text):
         req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
         try:
             urllib.request.urlopen(req, timeout=30).read()
-        except Exception as e:  # URL token içerdiği için exception metnini basmıyoruz
+        except urllib.error.HTTPError as e:
+            # URL token içerdiği için exception metnini değil, sadece Telegram'ın açıklamasını basıyoruz
+            try:
+                desc = json.loads(e.read().decode()).get("description", "")
+            except Exception:
+                desc = ""
+            log(f"Telegram gönderimi başarısız: HTTP {e.code} {desc}")
+            ok = False
+        except Exception as e:
             log(f"Telegram gönderimi başarısız ({type(e).__name__}).")
             ok = False
     return ok
@@ -454,8 +463,9 @@ def save_json(path, data):
 
 
 def record_failure(reason):
-    st = load_json(STATUS_FILE, {"fails": 0, "alerted": False})
-    st["fails"] += 1
+    st = load_json(STATUS_FILE, {})
+    st["fails"] = st.get("fails", 0) + 1
+    st.setdefault("alerted", False)
     log(f"Başarısız çalıştırma #{st['fails']} üst üste: {reason}")
     if st["fails"] >= FAIL_ALERT_THRESHOLD and not st["alerted"]:
         if telegram(f"⚠️ OBS botu {st['fails']} çalıştırmadır üst üste başarısız: {reason}"):
@@ -464,10 +474,10 @@ def record_failure(reason):
 
 
 def record_success():
-    st = load_json(STATUS_FILE, {"fails": 0, "alerted": False})
+    st = load_json(STATUS_FILE, {})
     if st.get("alerted"):
         telegram("✅ OBS botu tekrar çalışıyor.")
-    save_json(STATUS_FILE, {"fails": 0, "alerted": False})
+    save_json(STATUS_FILE, {"fails": 0, "alerted": False, "initialized": True})
 
 
 # --------------------------------------------------------------------------
@@ -585,13 +595,17 @@ def mode_run():
             browser.close()
 
     old = load_json(GRADES_FILE, None)
-    if old is None:
-        telegram(summary(grades))
+    status = load_json(STATUS_FILE, {})
+    if old is None or not status.get("initialized"):
+        sent = telegram(summary(grades))
     else:
         msgs = diff_grades(old, grades)
-        if msgs:
-            telegram("\n".join(msgs))
         log(f"{len(msgs)} yeni/değişen not.")
+        sent = telegram("\n".join(msgs)) if msgs else True
+    if not sent:
+        # Mesaj gitmediyse durumu güncelleme; bir sonraki çalıştırma tekrar dener.
+        record_failure("Telegram mesajı gönderilemedi")
+        return 1
     save_json(GRADES_FILE, grades)
     record_success()
     return 0
