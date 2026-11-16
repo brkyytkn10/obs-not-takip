@@ -577,8 +577,7 @@ def mode_discover():
                 tables = fr.evaluate(TABLES_JS)
                 save_json(d / "03_notes_tables.json", tables)
                 # Log'a sadece yapı: tablo boyutları ve ilk satır (başlık) - not değerleri yok
-                for i, t in enumerate(tables):
-                    log(f"TABLO {i}: {len(t)} satır, başlık={t[0] if t else []}")
+                log(f"{len(tables)} tablo bulundu (ayrıntı artifact'te).")
                 try:
                     g = parse_tables(tables)
                     log(f"Ayrıştırıcı {len(g)} ders, {sum(len(v) for v in g.values())} not buldu.")

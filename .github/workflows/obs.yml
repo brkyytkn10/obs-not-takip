@@ -2,7 +2,7 @@ name: OBS Not Takip
 
 on:
   schedule:
-    - cron: '7 * * * *'
+    - cron: '*/10 * * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -17,6 +17,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write   # sadece zamanlanmış workflow'u etkin tutmak için (aşağıdaki keepalive adımı)
 
 env:
   MODE: ${{ github.event.inputs.mode || 'run' }}
@@ -84,8 +85,9 @@ jobs:
           path: state
           key: obs-state-${{ github.run_id }}-${{ github.run_attempt }}
 
+      # Artifact'lerde ad/öğrenci no/notlar olabilir: repo public ise yüklenmez.
       - name: Discover çıktısını yükle
-        if: always() && env.MODE == 'discover'
+        if: always() && env.MODE == 'discover' && github.event.repository.private
         uses: actions/upload-artifact@v4
         with:
           name: discover
@@ -94,10 +96,24 @@ jobs:
           if-no-files-found: warn
 
       - name: Hata ekran görüntüsünü yükle
-        if: failure() && env.MODE == 'run'
+        if: failure() && env.MODE == 'run' && github.event.repository.private
         uses: actions/upload-artifact@v4
         with:
           name: run-error
           path: out/error
           retention-days: 3
           if-no-files-found: ignore
+
+      # GitHub, public repo'larda 60 gün commit olmazsa zamanlanmış workflow'ları kapatır.
+      # Günde bir kez workflow'u yeniden "enable" ederek bunu önler.
+      - name: Zamanlamayı etkin tut
+        if: always() && github.event_name == 'schedule'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(date -u +%H%M)" \< "0010" ]; then
+            curl -sS -o /dev/null -w "keepalive HTTP %{http_code}\n" -X PUT \
+              -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/obs.yml/enable"
+          fi
