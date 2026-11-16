@@ -43,7 +43,7 @@ STATE_DIR = Path(os.environ.get("STATE_DIR", "state"))
 GRADES_FILE = STATE_DIR / "grades.json"
 STATUS_FILE = STATE_DIR / "status.json"
 
-MAX_LOGIN_ATTEMPTS = 5
+MAX_LOGIN_ATTEMPTS = 8
 FAIL_ALERT_THRESHOLD = 3
 NAV_TIMEOUT = 45_000
 
@@ -78,8 +78,8 @@ def telegram(text):
 # --------------------------------------------------------------------------
 # OBS captcha'sı: gri "A + B = ?" yazısı, renkli gürültü çizgileri/daireler, sağda hoparlör ikonu.
 CAPTCHA_CROP = 0.84          # sağdaki hoparlör ikonunu kes
-CAPTCHA_MIN_VOTES = 8        # bu kadar varyant aynı sonucu vermezse gönderme, sayfayı yenile
-CAPTCHA_MIN_MARGIN = 3       # birinci ile ikinci sonuç arasındaki en az oy farkı
+CAPTCHA_MIN_VOTES = 6        # bu kadar varyant aynı sonucu vermezse gönderme, sayfayı yenile
+CAPTCHA_MIN_MARGIN = 2       # birinci ile ikinci sonuç arasındaki en az oy farkı
 CAPTCHA_MASKS = [(30, 170), (30, 185), (40, 170), (40, 185)]   # (max doygunluk, max parlaklık)
 CAPTCHA_VARIANTS = [(sc, dil, bl) for sc in (3, 4) for dil in (0, 3) for bl in (0, 2)]
 
