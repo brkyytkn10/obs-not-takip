@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'discover = site yapısını keşfet, run = notları kontrol et'
+        description: 'discover = site yapısını keşfet, run = notları kontrol et, test = örnek Telegram mesajı'
         type: choice
-        options: [discover, run]
+        options: [discover, run, test]
         default: discover
 
 concurrency:

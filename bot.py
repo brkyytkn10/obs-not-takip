@@ -643,6 +643,16 @@ def mode_run():
     return 0
 
 
+def mode_test():
+    """Örnek notlarla mesaj biçimini Telegram'a gönderir; OBS'ye girmez, durumu değiştirmez."""
+    old = {"Matematik 1": {"Vize 1": "70"}, "Medical Informatics": {}}
+    new = {"Matematik 1": {"Vize 1": "78", "Ödev 1": "90"},
+           "Medical Informatics": {"Ara Sınav": "65"},
+           "Sosyal Politikalar İktisadı": {"Vize": "82"}}
+    msg = "🧪 DENEME MESAJI (gerçek notlar değil)\n\n" + new_grades_message(diff_grades(old, new), new)
+    return 0 if telegram(msg, html=True) else 1
+
+
 def main():
     mode = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("MODE", "run")).strip()
     if mode == "discover":
@@ -650,6 +660,8 @@ def main():
         return 0
     if mode == "run":
         return mode_run()
+    if mode == "test":
+        return mode_test()
     log(f"Bilinmeyen mod: {mode}")
     return 2
 
