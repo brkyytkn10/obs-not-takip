@@ -212,6 +212,13 @@ def settle(page):
         pass
 
 
+def fill_field(el, value):
+    """OBS alanları onfocus'a kadar readonly; kilidi kaldırıp doldur."""
+    el.evaluate("e => { e.removeAttribute('readonly'); e.readOnly = false; }")
+    el.click()
+    el.fill(value)
+
+
 def login(page, discover_dir=None):
     """Captcha çözerek giriş yapar. discover_dir verilirse her denemenin captcha'sını kaydeder."""
     user, pw_ = os.environ["OBS_USER"], os.environ["OBS_PASS"]
@@ -242,9 +249,9 @@ def login(page, discover_dir=None):
             proc_png.unlink(missing_ok=True)
         if total is None:
             continue
-        u_el.fill(user)
-        p_el.fill(pw_)
-        c_el.fill(str(total))
+        fill_field(u_el, user)
+        fill_field(p_el, pw_)
+        fill_field(c_el, str(total))
         if SELECTORS["submit"] or page.locator("button[type=submit], input[type=submit]").count():
             _loc(page, "submit", "button[type=submit], input[type=submit]").click()
         else:
@@ -403,6 +410,11 @@ def mode_discover():
                 "frames": [f.url for f in page.frames],
             }
             save_json(d / "01_login_summary.json", summ)
+            # Hassas bilgi içermeyen özet; uzun değerler (ViewState vb.) kısaltılır.
+            for x in summ["inputs"]:
+                if x.get("value") and len(x["value"]) > 40:
+                    x["value"] = x["value"][:40] + "..."
+            log("LOGIN_SUMMARY " + json.dumps(summ, ensure_ascii=False))
             try:
                 find_captcha_img(page).screenshot(path=str(d / "captcha_page_load.png"))
             except Exception as e:
@@ -410,7 +422,10 @@ def mode_discover():
 
             ok = False
             if os.environ.get("OBS_USER") and os.environ.get("OBS_PASS"):
-                ok = login(page, discover_dir=d)
+                try:
+                    ok = login(page, discover_dir=d)
+                except Exception as e:
+                    log(f"Login hatası: {type(e).__name__}: {str(e).splitlines()[0]}")
             else:
                 log("OBS_USER/OBS_PASS yok; sadece login sayfası kaydedildi.")
             log(f"Giriş sonucu: {ok}")
