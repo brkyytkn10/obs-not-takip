@@ -7,6 +7,7 @@ Modlar:
 
 Gizli bilgiler env'den gelir: OBS_USER, OBS_PASS, TG_TOKEN, TG_CHAT_ID. Hiçbiri loglanmaz.
 """
+import html
 import json
 import os
 import re
@@ -56,7 +57,7 @@ def log(msg):
 # --------------------------------------------------------------------------
 # Telegram
 # --------------------------------------------------------------------------
-def telegram(text):
+def telegram(text, html=False):
     token, chat = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT_ID")
     if not token or not chat:
         log("Telegram bilgileri yok, mesaj atlanıyor.")
@@ -64,7 +65,10 @@ def telegram(text):
     ok = True
     chunks = [text[i:i + 3800] for i in range(0, len(text), 3800)] or [""]
     for chunk in chunks:
-        data = urllib.parse.urlencode({"chat_id": chat, "text": chunk}).encode()
+        params = {"chat_id": chat, "text": chunk}
+        if html:
+            params["parse_mode"] = "HTML"
+        data = urllib.parse.urlencode(params).encode()
         req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
         try:
             urllib.request.urlopen(req, timeout=30).read()
@@ -447,6 +451,35 @@ def summary(grades):
     return "\n".join(lines)
 
 
+def _cut(text, width):
+    return text if len(text) <= width else text[:width - 1] + "…"
+
+
+def grades_table(grades):
+    """Notu olan dersler için eş aralıklı (monospace) tablo, Telegram HTML <pre> içinde."""
+    rows = [(c, e, v) for c, exams in grades.items() for e, v in exams.items()]
+    if not rows:
+        return ""
+    wc = min(16, max(len(r[0]) for r in rows))
+    we = min(11, max(len(r[1]) for r in rows))
+    wv = max(3, max(len(r[2]) for r in rows))
+    lines = [f"{'Ders':<{wc}} {'Sınav':<{we}} {'Not':>{wv}}", "-" * (wc + we + wv + 2)]
+    prev = None
+    for c, e, v in rows:
+        name = _cut(c, wc) if c != prev else ""
+        lines.append(f"{name:<{wc}} {_cut(e, we):<{we}} {v:>{wv}}")
+        prev = c
+    return "<pre>" + html.escape("\n".join(lines)) + "</pre>"
+
+
+def new_grades_message(msgs, grades):
+    text = "\n".join(html.escape(m) for m in msgs)
+    table = grades_table(grades)
+    if table and len(text) + len(table) < 3800:
+        text += "\n\n📊 Tüm notlar:\n" + table
+    return text
+
+
 # --------------------------------------------------------------------------
 # Durum (cache içinde tutulur, repoya commit edilmez)
 # --------------------------------------------------------------------------
@@ -601,7 +634,7 @@ def mode_run():
     else:
         msgs = diff_grades(old, grades)
         log(f"{len(msgs)} yeni/değişen not.")
-        sent = telegram("\n".join(msgs)) if msgs else True
+        sent = telegram(new_grades_message(msgs, grades), html=True) if msgs else True
     if not sent:
         # Mesaj gitmediyse durumu güncelleme; bir sonraki çalıştırma tekrar dener.
         record_failure("Telegram mesajı gönderilemedi")
