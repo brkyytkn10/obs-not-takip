@@ -37,10 +37,11 @@ jobs:
       - name: Python bağımlılıkları
         run: pip install -r requirements.txt
 
+      # apt-get update yavaş olabildiği için önce doğrudan kurmayı dene.
       - name: Tesseract
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq tesseract-ocr
+          sudo apt-get install -y -qq --no-install-recommends tesseract-ocr \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends tesseract-ocr; }
 
       - name: Playwright tarayıcı cache
         id: pw-cache
@@ -52,7 +53,14 @@ jobs:
       - name: Chromium kur
         run: |
           if [ "${{ steps.pw-cache.outputs.cache-hit }}" = "true" ]; then
-            playwright install-deps chromium
+            # Runner'da Chrome kurulu olduğundan sistem kütüphaneleri genelde hazır;
+            # sadece eksik varsa (yavaş) install-deps çalıştır.
+            bin=$(find ~/.cache/ms-playwright -type f \( -name headless_shell -o -name chrome \) | head -1)
+            if [ -z "$bin" ] || ldd "$bin" | grep -q "not found"; then
+              playwright install-deps chromium
+            else
+              echo "Chromium kütüphaneleri hazır, install-deps atlandı."
+            fi
           else
             playwright install --with-deps chromium
           fi

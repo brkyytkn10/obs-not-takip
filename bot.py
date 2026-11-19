@@ -164,7 +164,9 @@ def solve_captcha(src: Path, work: Path, keep_debug=False):
             captcha_variant(mask, sc, dil, bl).save(tmp)
             if keep_debug and i == 0 and j == 0:
                 captcha_variant(mask, sc, dil, bl).save(src.with_name(src.stem + "_processed.png"))
-            m = re.search(r"(\d{1,2})\+(\d{1,2})", _tesseract(tmp))
+            # İkinci sayı her zaman tek haneli (gözlenen tüm captcha'larda); "= ?" bazen rakam
+            # okunduğu için ("25+67") yalnızca ilk haneyi al.
+            m = re.search(r"(\d{1,2})\+(\d)", _tesseract(tmp))
             if m:
                 votes[(int(m.group(1)), int(m.group(2)))] += 1
     tmp.unlink(missing_ok=True)
