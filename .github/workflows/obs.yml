@@ -1,15 +1,15 @@
 name: OBS Not Takip
 
+# Zamanlama GitHub'ın schedule'ı yerine harici bir cron servisiyle (ör. cron-job.org)
+# workflow_dispatch tetiklenerek yapılır; ayrıntılar README.md'de.
 on:
-  schedule:
-    - cron: '1-59/10 * * * *'
   workflow_dispatch:
     inputs:
       mode:
         description: 'discover = site yapısını keşfet, run = notları kontrol et, test = örnek Telegram mesajı'
         type: choice
         options: [discover, run, test]
-        default: discover
+        default: run
 
 concurrency:
   group: obs-not-takip
@@ -17,7 +17,6 @@ concurrency:
 
 permissions:
   contents: read
-  actions: write   # sadece zamanlanmış workflow'u etkin tutmak için (aşağıdaki keepalive adımı)
 
 env:
   MODE: ${{ github.event.inputs.mode || 'run' }}
@@ -104,16 +103,3 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
 
-      # GitHub, public repo'larda 60 gün commit olmazsa zamanlanmış workflow'ları kapatır.
-      # Günde bir kez workflow'u yeniden "enable" ederek bunu önler.
-      - name: Zamanlamayı etkin tut
-        if: always() && github.event_name == 'schedule'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ "$(date -u +%H%M)" \< "0010" ]; then
-            curl -sS -o /dev/null -w "keepalive HTTP %{http_code}\n" -X PUT \
-              -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/obs.yml/enable"
-          fi
