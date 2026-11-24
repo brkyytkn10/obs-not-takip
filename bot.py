@@ -352,6 +352,10 @@ def notes_frame(page):
     return page.frame(name="IFRAME1")
 
 
+class SurveyRequired(Exception):
+    """OBS, notları göstermeden önce ders değerlendirme anketinin doldurulmasını istiyor."""
+
+
 def open_notes(page):
     """Menüdeki 'Not Listesi' linkinin (oturuma özel gkm token'lı) adresini alıp IFRAME1'e yükler.
     Not sayfasının frame'ini döndürür."""
@@ -374,7 +378,10 @@ def open_notes(page):
     except Exception:
         pass
     page.wait_for_timeout(1500)
-    log(f"Not sayfası açıldı: {urllib.parse.urlsplit(fr.url).path}")
+    path = urllib.parse.urlsplit(fr.url).path
+    log(f"Not sayfası açıldı: {path}")
+    if "eva_form" in path.lower():
+        raise SurveyRequired(path)
     return fr
 
 
@@ -508,9 +515,23 @@ def record_failure(reason):
     save_json(STATUS_FILE, st)
 
 
+def handle_survey_required():
+    """Anket bir bot hatası değil: arıza sayacını sıfırla, kullanıcıya bir kez haber ver."""
+    st = load_json(STATUS_FILE, {})
+    st["fails"], st["alerted"] = 0, False
+    if not st.get("survey_alerted"):
+        if telegram("📝 OBS, notlarını göstermeden önce ders değerlendirme anketlerini "
+                    "doldurmanı istiyor; bu yüzden şu an notlarını kontrol edemiyorum.\n\n"
+                    "OBS'ye girip anketleri doldurduğunda takip kendiliğinden devam edecek."):
+            st["survey_alerted"] = True
+    save_json(STATUS_FILE, st)
+
+
 def record_success():
     st = load_json(STATUS_FILE, {})
-    if st.get("alerted"):
+    if st.get("survey_alerted"):
+        telegram("✅ Anketler tamamlanmış, not takibi yeniden çalışıyor.")
+    elif st.get("alerted"):
         telegram("✅ OBS botu tekrar çalışıyor.")
     save_json(STATUS_FILE, {"fails": 0, "alerted": False, "initialized": True})
 
@@ -618,6 +639,10 @@ def mode_run():
             except Exception:
                 save_page(page, "run_notes_parse_failed", OUT_DIR / "error")
                 raise
+        except SurveyRequired as e:
+            log(f"OBS ders değerlendirme anketine yönlendirdi ({e}); notlar okunamıyor.")
+            handle_survey_required()
+            return 0
         except Exception as e:
             try:
                 save_page(page, "run_error", OUT_DIR / "error")
