@@ -82,6 +82,9 @@ jobs:
           OBS_PASS: ${{ secrets.OBS_PASS }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # Ders değerlendirme anketini otomatik doldurma: asıl repo'da açık, kopyalarda
+          # (şablondan oluşturulanlar) repo değişkeni AUTO_SURVEY=1 yapılmadıkça kapalı.
+          AUTO_SURVEY: ${{ vars.AUTO_SURVEY || (github.repository == 'brkyytkn10/obs-not-takip' && '1' || '0') }}
         run: python bot.py "$MODE"
 
       # Başarısız çalıştırmada da kaydet ki üst üste hata sayacı korunsun.

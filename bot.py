@@ -356,6 +356,147 @@ class SurveyRequired(Exception):
     """OBS, notları göstermeden önce ders değerlendirme anketinin doldurulmasını istiyor."""
 
 
+class SurveyFillError(Exception):
+    """Anket otomatik doldurulamadı (yapı tanınmadı); hiçbir şey gönderilmedi."""
+
+
+# Ders değerlendirme anketini otomatik doldurma (her soruya "Kesinlikle katılıyorum").
+# Yalnızca AUTO_SURVEY=1 iken; workflow bunu sadece asıl repo'da varsayılan olarak açar.
+AUTO_SURVEY = os.environ.get("AUTO_SURVEY", "0") == "1"
+SURVEY_TARGET = "kesinlikle katılıyorum"
+SURVEY_SUBMIT_RE = r"kaydet|gönder|tamamla|bitir|onayla|sonraki|ileri|devam"
+SURVEY_START_RE = r"değerlendir|ankete|doldur|başla"
+SURVEY_AVOID_RE = r"iptal|vazgeç|geri|çıkış|temizle|sıfırla"
+
+SURVEY_JS = """(target) => {
+  const norm = s => (s || '').replace(/İ/g, 'i').replace(/I/g, 'ı').toLowerCase()
+                             .replace(/\\s+/g, ' ').trim();
+  const radios = [...document.querySelectorAll('input[type=radio]')]
+      .filter(r => !r.disabled && r.offsetParent !== null);
+  const onlyRadio = (el, r) => el && el.querySelectorAll('input[type=radio]').length === 1;
+  const labelsOf = r => {
+    const t = [];
+    if (r.id) { const l = document.querySelector('label[for="' + CSS.escape(r.id) + '"]'); if (l) t.push(l.innerText); }
+    const pl = r.closest('label'); if (onlyRadio(pl)) t.push(pl.innerText);
+    if (r.title) t.push(r.title);
+    if (r.getAttribute('aria-label')) t.push(r.getAttribute('aria-label'));
+    const n = r.nextSibling; if (n && n.nodeType === 3) t.push(n.textContent);
+    const cell = r.closest('td,th');
+    if (onlyRadio(cell)) {
+      t.push(cell.innerText);
+      const row = cell.parentElement, table = cell.closest('table');
+      const idx = [...row.cells].indexOf(cell);
+      if (table) for (const hr of [...table.rows].slice(0, 4)) {
+        if (hr !== row && hr.cells.length === row.cells.length) { t.push(hr.cells[idx].innerText); break; }
+      }
+    }
+    return t.map(norm).filter(Boolean);
+  };
+  const groups = {};
+  radios.forEach((r, i) => {
+    r.setAttribute('data-obsbot-r', String(i));
+    const k = r.name || ('_' + i);
+    (groups[k] = groups[k] || []).push({i, checked: r.checked, labels: labelsOf(r)});
+  });
+  return Object.entries(groups).map(([name, opts]) => {
+    const pick = opts.find(o => o.labels.some(l => l.includes(target)));
+    return {name, n: opts.length, pick: pick ? pick.i : null, done: pick ? pick.checked : false,
+            labels: [...new Set(opts.map(o => o.labels[0] || '?'))]};
+  });
+}"""
+
+CLICKABLE_JS = """([want, avoid]) => {
+  const norm = s => (s || '').replace(/İ/g, 'i').replace(/I/g, 'ı').toLowerCase().replace(/\\s+/g, ' ').trim();
+  const els = [...document.querySelectorAll('button, input[type=submit], input[type=button], a')]
+      .filter(e => e.offsetParent !== null && !e.disabled);
+  const texts = els.map(e => norm(e.innerText || e.value || e.title || ''));
+  const i = texts.findIndex(t => t && new RegExp(want).test(t) && !new RegExp(avoid).test(t));
+  if (i >= 0) els[i].setAttribute('data-obsbot-b', '1');
+  return {found: i >= 0, text: i >= 0 ? texts[i] : null, all: texts.filter(Boolean).slice(0, 15)};
+}"""
+
+
+def _survey_signature(groups):
+    return tuple(sorted((g["name"], g["n"]) for g in groups))
+
+
+def _click_marked(fr, selector):
+    fr.locator(selector).first.click(force=True)
+    try:
+        fr.wait_for_load_state("load", timeout=10_000)
+    except Exception:
+        pass
+    fr.page.wait_for_timeout(400)
+
+
+def fill_survey_page(fr):
+    """Mevcut anket sayfasındaki tüm soruları 'Kesinlikle katılıyorum' yapıp gönderir.
+    Bir soruda bile bu şık bulunamazsa hiçbir şey göndermeden SurveyFillError atar."""
+    groups = fr.evaluate(SURVEY_JS, SURVEY_TARGET)
+    if not groups:
+        btn = fr.evaluate(CLICKABLE_JS, [SURVEY_START_RE, SURVEY_AVOID_RE])
+        if btn["found"]:
+            log(f"Anket listesi: '{btn['text']}' tıklanıyor.")
+            _click_marked(fr, "[data-obsbot-b]")
+            return "opened"
+        raise SurveyFillError(f"soru bulunamadı; butonlar={btn['all']}")
+    missing = [g for g in groups if g["pick"] is None]
+    if missing:
+        raise SurveyFillError(f"{len(missing)}/{len(groups)} soruda '{SURVEY_TARGET}' şıkkı yok; "
+                              f"örnek şıklar={missing[0]['labels'][:8]}")
+    log(f"Anket: {len(groups)} soru dolduruluyor.")
+    for _ in range(len(groups) + 5):     # autopostback sayfayı yenileyebilir: her seferinde yeniden oku
+        todo = [g for g in fr.evaluate(SURVEY_JS, SURVEY_TARGET) if not g["done"]]
+        if not todo:
+            break
+        if todo[0]["pick"] is None:
+            raise SurveyFillError("soru yapısı doldururken değişti")
+        _click_marked(fr, f'[data-obsbot-r="{todo[0]["pick"]}"]')
+    else:
+        raise SurveyFillError("seçimler işaretlenemedi")
+    btn = fr.evaluate(CLICKABLE_JS, [SURVEY_SUBMIT_RE, SURVEY_AVOID_RE])
+    if not btn["found"]:
+        raise SurveyFillError(f"gönder butonu bulunamadı; butonlar={btn['all']}")
+    log(f"Anket gönderiliyor: '{btn['text']}'")
+    _click_marked(fr, "[data-obsbot-b]")
+    _confirm_dialogs(fr.page)
+    return "submitted"
+
+
+def _confirm_dialogs(page):
+    """SweetAlert gibi onay pencerelerini onayla (üst sayfada ya da iframe'de)."""
+    page.wait_for_timeout(800)
+    for f in [page] + page.frames:
+        try:
+            loc = f.locator(".swal2-confirm:visible")
+            if loc.count():
+                loc.first.click()
+                page.wait_for_timeout(1000)
+        except Exception:
+            pass
+
+
+def fill_surveys(page):
+    """Not sayfası anket istedikçe anketleri doldurur. Doldurulan form sayısını döndürür."""
+    page.on("dialog", lambda d: d.accept())          # JS confirm/alert pencereleri
+    filled, last_sig, same = 0, None, 0
+    for _ in range(25):
+        fr = notes_frame(page)
+        sig = _survey_signature(fr.evaluate(SURVEY_JS, SURVEY_TARGET))
+        same = same + 1 if sig == last_sig and sig else 0
+        if same >= 2:
+            raise SurveyFillError("anket gönderildi ama sayfa ilerlemiyor (zorunlu alan olabilir)")
+        last_sig = sig
+        if fill_survey_page(fr) == "submitted":
+            filled += 1
+        try:
+            open_notes(page)
+            return filled
+        except SurveyRequired:
+            continue
+    raise SurveyFillError("çok fazla anket sayfası")
+
+
 def open_notes(page):
     """Menüdeki 'Not Listesi' linkinin (oturuma özel gkm token'lı) adresini alıp IFRAME1'e yükler.
     Not sayfasının frame'ini döndürür."""
@@ -633,12 +774,25 @@ def mode_run():
                 save_page(page, "run_login_failed", OUT_DIR / "error")
                 record_failure("giriş yapılamadı (captcha/kimlik bilgisi)")
                 return 1
-            fr = open_notes(page)
+            try:
+                fr = open_notes(page)
+            except SurveyRequired:
+                if not AUTO_SURVEY:
+                    raise
+                log("Anket otomatik dolduruluyor (AUTO_SURVEY=1).")
+                n = fill_surveys(page)
+                telegram(f"📝 Ders değerlendirme anketi otomatik dolduruldu ({n} form; "
+                         f"tüm sorular: Kesinlikle katılıyorum). Not takibi devam ediyor.")
+                fr = open_notes(page)
             try:
                 grades = scrape_grades(fr)
             except Exception:
                 save_page(page, "run_notes_parse_failed", OUT_DIR / "error")
                 raise
+        except SurveyFillError as e:
+            log(f"Anket otomatik doldurulamadı, hiçbir şey gönderilmedi: {e}")
+            handle_survey_required()
+            return 0
         except SurveyRequired as e:
             log(f"OBS ders değerlendirme anketine yönlendirdi ({e}); notlar okunamıyor.")
             handle_survey_required()

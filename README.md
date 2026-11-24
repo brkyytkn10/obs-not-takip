@@ -91,6 +91,17 @@ Bitti. Repo'nun **Actions** sekmesinde 10 (ya da 30) dakikada bir yeni çalışt
 - **OBS şifreni değiştirirsen** `OBS_PASS` secret'ını güncelle.
 - Captcha bazen okunamaz; bot her çalıştırmada 8 kez dener. Arada bir başarısız çalıştırma normaldir.
 
+## Ders değerlendirme anketi
+
+Sınav dönemlerinde OBS, notları göstermeden önce ders değerlendirme anketlerinin doldurulmasını ister.
+Varsayılan olarak bot bunu fark edip sana bir kez "📝 anketleri doldurman gerekiyor" mesajı atar;
+sen anketleri doldurunca takip kendiliğinden devam eder.
+
+İstersen bot anketleri **her soruya "Kesinlikle katılıyorum"** diyerek senin yerine doldurabilir.
+Bunu açmak için repo'nda **Settings → Secrets and variables → Actions → Variables** sekmesinde
+**New repository variable** ile `AUTO_SURVEY` = `1` ekle. Bot bir soruda bu şıkkı bulamazsa
+hiçbir şey göndermez ve yine sana mesaj atar.
+
 ## Modlar
 
 | Mod | Ne yapar |
