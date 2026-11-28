@@ -645,6 +645,18 @@ def save_json(path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def describe_error(e):
+    """Hata mesajını kullanıcının anlayacağı bir açıklamaya çevirir."""
+    msg = str(e)
+    if "ERR_CERT" in msg:
+        return ("OBS sitesinin güvenlik (SSL) sertifikası geçersiz; sorun üniversite tarafında. "
+                "Şifren güvende kalsın diye bu durumda giriş yapılmıyor; sertifika "
+                "yenilenince takip kendiliğinden devam edecek.")
+    if any(k in msg for k in ("ERR_CONNECTION", "ERR_NAME_NOT_RESOLVED", "ERR_TIMED_OUT", "Timeout")):
+        return "OBS sitesine ulaşılamıyor (site kapalı ya da çok yavaş olabilir)."
+    return f"{type(e).__name__}: {msg.splitlines()[0][:200]}"
+
+
 def record_failure(reason):
     st = load_json(STATUS_FILE, {})
     st["fails"] = st.get("fails", 0) + 1
@@ -802,7 +814,7 @@ def mode_run():
                 save_page(page, "run_error", OUT_DIR / "error")
             except Exception:
                 pass
-            record_failure(f"{type(e).__name__}: {e}")
+            record_failure(describe_error(e))
             return 1
         finally:
             browser.close()
